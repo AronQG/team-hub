@@ -1,0 +1,80 @@
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import { verifyToken } from './lib/auth'
+
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next()
+  
+  // Добавляем заголовки безопасности
+  response.headers.set('X-Content-Type-Options', 'nosniff')
+  response.headers.set('X-Frame-Options', 'DENY')
+  response.headers.set('X-XSS-Protection', '1; mode=block')
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  
+  // Защита от CSRF для API endpoints
+  if (request.nextUrl.pathname.startsWith('/api/')) {
+    const method = request.method
+    if (method === 'POST' || method === 'PUT' || method === 'DELETE' || method === 'PATCH') {
+      const origin = request.headers.get('origin')
+      const referer = request.headers.get('referer')
+      
+      // Проверяем, что запрос пришел с того же домена или разрешенных источников
+      if (origin && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+        const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()) || []
+        if (!allowedOrigins.includes(origin)) {
+          return new NextResponse('Forbidden', { status: 403 })
+        }
+      }
+    }
+  }
+
+  const token = request.cookies.get('auth-token')?.value
+  const isAuthPage = request.nextUrl.pathname.startsWith('/login') || 
+                     request.nextUrl.pathname.startsWith('/signup')
+  const isPublicPage = request.nextUrl.pathname === '/' || 
+                      request.nextUrl.pathname.startsWith('/api/') ||
+                      request.nextUrl.pathname.startsWith('/_next/') ||
+                      request.nextUrl.pathname.startsWith('/favicon.ico')
+  
+  // Если это публичная страница, пропускаем проверку аутентификации
+  if (isPublicPage) {
+    return response
+  }
+  
+  // Если нет токена и это не страница аутентификации, редиректим на логин
+  if (!token && !isAuthPage) {
+    const loginUrl = new URL('/login', request.url)
+    loginUrl.searchParams.set('redirect', request.nextUrl.pathname)
+    return NextResponse.redirect(loginUrl)
+  }
+  
+  // Если есть токен и это страница аутентификации, проверяем его валидность
+  if (token && isAuthPage) {
+    const payload = verifyToken(token)
+    if (payload && payload.exp * 1000 > Date.now()) {
+      // Токен валиден, редиректим на дашборд
+      const redirectTo = request.nextUrl.searchParams.get('redirect') || '/dashboard'
+      return NextResponse.redirect(new URL(redirectTo, request.url))
+    }
+  }
+  
+  // Если есть токен, но он невалиден, и это не страница аутентификации
+  if (token && !isAuthPage) {
+    const payload = verifyToken(token)
+    if (!payload || payload.exp * 1000 <= Date.now()) {
+      // Токен невалиден, очищаем куки и редиректим на логин
+      const loginUrl = new URL('/login', request.url)
+      loginUrl.searchParams.set('redirect', request.nextUrl.pathname)
+      const redirectResponse = NextResponse.redirect(loginUrl)
+      redirectResponse.cookies.delete('auth-token')
+      return redirectResponse
+    }
+  }
+  
+  return response
+}
+
+export const config = {
+  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)']
+}
