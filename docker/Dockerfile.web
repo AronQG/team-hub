@@ -1,0 +1,57 @@
+# Используем официальный Node.js образ с Alpine Linux для меньшего размера
+FROM node:20-alpine AS base
+
+# Устанавливаем зависимости только когда нужно
+FROM base AS deps
+# Проверяем https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine для понимания, почему libc6-compat нужен
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Копируем файлы зависимостей
+COPY package.json package-lock.json* ./
+COPY apps/web/package.json ./apps/web/
+COPY packages/db/package.json ./packages/db/
+
+# Устанавливаем зависимости
+RUN npm ci --only=production
+
+# Пересобираем исходный код только когда нужно
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Генерируем Prisma клиент
+RUN npx prisma generate
+
+# Собираем приложение
+RUN npm run build
+
+# Продакшн образ, копируем все необходимое и запускаем приложение
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+# Создаем непривилегированного пользователя
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Копируем собранное приложение
+COPY --from=builder /app/apps/web/public ./apps/web/public
+
+# Автоматически используем output standalone для оптимизации образа
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+
+# Копируем Prisma схему и клиент
+COPY --from=builder /app/packages/db ./packages/db
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
+
+# Запускаем приложение
+CMD ["node", "apps/web/server.js"]
